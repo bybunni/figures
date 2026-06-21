@@ -15,10 +15,13 @@ shrinks with sample count); Part-X proper uses Gaussian-process estimates of the
 level set with statistical guarantees, but the control flow is the same.
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+import argparse
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.patches import Rectangle
 
 rng = np.random.default_rng(7)
 
@@ -130,6 +133,9 @@ def run(n_iters=9, snapshot_at=(1, 3, 6, 9)):
 COLORS = {"remaining": "#b9c2f0", "positive": "#cdeccd", "negative": "#f3b9b9"}
 
 def plot(snapshots, path="partition_iterations.png"):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     fig, axes = plt.subplots(1, len(snapshots), figsize=(4.6 * len(snapshots), 4.6))
     xs = np.linspace(BOUNDS[0], BOUNDS[1], 400)
     ys = np.linspace(BOUNDS[2], BOUNDS[3], 400)
@@ -153,7 +159,86 @@ def plot(snapshots, path="partition_iterations.png"):
                  "gray contour = true zero level set)", y=1.02)
     fig.tight_layout()
     fig.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
     print(f"wrote {path}")
 
+def _project_root():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return Path.cwd()
+
+def default_output_path():
+    return _project_root() / "output" / "partition_iterations.png"
+
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+def _default_snapshot_at(n_iters):
+    return tuple(sorted({k for k in (1, 3, 6, n_iters) if k <= n_iters}))
+
+def _parse_snapshot_at(value, n_iters):
+    if value is None:
+        return _default_snapshot_at(n_iters)
+
+    snapshots = []
+    for raw in value.split(","):
+        raw = raw.strip()
+        if not raw:
+            raise argparse.ArgumentTypeError("snapshots must not contain empty values")
+        try:
+            snapshot = int(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("snapshots must be integers") from exc
+        if snapshot <= 0:
+            raise argparse.ArgumentTypeError("snapshots must be positive")
+        if snapshot > n_iters:
+            raise argparse.ArgumentTypeError("snapshots must be within iterations")
+        snapshots.append(snapshot)
+
+    if not snapshots:
+        raise argparse.ArgumentTypeError("snapshots must not be empty")
+    return tuple(sorted(set(snapshots)))
+
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        description="Run the adaptive 2D partitioning demo and save a figure.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=_positive_int,
+        default=9,
+        help="number of branch-and-classify iterations to run (default: 9)",
+    )
+    parser.add_argument(
+        "--snapshots",
+        help="comma-separated iterations to include in the output figure",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=default_output_path(),
+        help=f"path for the generated figure (default: {default_output_path()})",
+    )
+    return parser
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        snapshot_at = _parse_snapshot_at(args.snapshots, args.iterations)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+
+    snapshots = run(n_iters=args.iterations, snapshot_at=snapshot_at)
+    plot(snapshots, path=args.output)
+    return 0
+
 if __name__ == "__main__":
-    plot(run())
+    raise SystemExit(main())
