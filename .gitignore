@@ -1,8 +1,13 @@
+# venv
 .venv
 
+# macOS
+.DS_Store
+
+# local
 *.zip
 *.png
-
 output/*
 
+# python
 *cpython-*
