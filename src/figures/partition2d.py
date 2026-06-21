@@ -19,6 +19,7 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from matplotlib import animation
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
@@ -87,7 +88,11 @@ class Region:
     def area(self):
         return (self.xmax - self.xmin) * (self.ymax - self.ymin)
 
-    def sample(self, n):
+    def _append_sample(self, point, value):
+        self.pts = np.vstack([self.pts, np.asarray(point).reshape(1, 2)])
+        self.vals = np.concatenate([self.vals, np.asarray([value])])
+
+    def sample(self, n, on_sample=None):
         if n <= 0:
             return
 
@@ -98,8 +103,15 @@ class Region:
         weights = _robustness_sample_weights(candidate_vals)
         picked = rng.choice(n_candidates, size=n, replace=False, p=weights)
         new = candidates[picked]
-        self.pts = np.vstack([self.pts, new])
-        self.vals = np.concatenate([self.vals, candidate_vals[picked]])
+        new_vals = candidate_vals[picked]
+        if on_sample is None:
+            self.pts = np.vstack([self.pts, new])
+            self.vals = np.concatenate([self.vals, new_vals])
+            return
+
+        for point, value in zip(new, new_vals):
+            self._append_sample(point, value)
+            on_sample(self, point, value)
 
     def classify(self):
         """Label the region if all evidence agrees, with a margin that shrinks
@@ -131,42 +143,131 @@ class Region:
             k.pts, k.vals = self.pts[mask], self.vals[mask]
         return kids
 
+@dataclass
+class AnimationFrame:
+    iteration: int
+    event: str
+    regions: list[Region]
+    label: str
+
+@dataclass
+class RunTrace:
+    snapshots: dict[int, list[Region]]
+    frames: list[AnimationFrame]
+
+def _copy_region(region):
+    return Region(
+        region.xmin,
+        region.xmax,
+        region.ymin,
+        region.ymax,
+        region.status,
+        region.pts.copy(),
+        region.vals.copy(),
+    )
+
+def _copy_regions(regions):
+    return [_copy_region(region) for region in regions]
+
+def _add_animation_frame(frames, iteration, event, regions, label):
+    if frames is not None:
+        frames.append(AnimationFrame(iteration, event, _copy_regions(regions), label))
+
 # ----------------------------------------------------------------------------
 # Main loop: branch and classify
 # ----------------------------------------------------------------------------
-def run(n_iters=9, snapshot_at=(1, 3, 6, 9)):
+def run(n_iters=9, snapshot_at=(1, 3, 6, 9), trace=False):
     regions = [Region(*BOUNDS)]
     snapshots = {}
+    frames = [] if trace else None
+    _add_animation_frame(frames, 0, "start", regions, "initial partition")
 
     for k in range(1, n_iters + 1):
         nxt = []
-        for r in regions:
+        for index, r in enumerate(regions):
+            remaining_regions = regions[index + 1:]
+
+            def current_regions(current):
+                return nxt + current + remaining_regions
+
+            def record_sample(sampled_region, point, value):
+                classification = "negative" if value < 0 else "positive"
+                _add_animation_frame(
+                    frames,
+                    k,
+                    "sample",
+                    current_regions([sampled_region]),
+                    f"sample {classification}, robustness={value:.3g}",
+                )
+
             if r.status != "remaining":
                 # light re-audit of classified regions: a few cheap samples,
                 # re-open the region if the label no longer holds
-                r.sample(3)
-                if r.classify() not in (r.status, "remaining") or \
-                   (r.classify() == "remaining" and len(r.vals) > 40 and
-                    np.sign(r.vals.min()) != np.sign(r.vals.max())):
+                r.sample(3, on_sample=record_sample)
+                label = r.classify()
+                mixed_signs = (
+                    label == "remaining"
+                    and len(r.vals) > 40
+                    and np.sign(r.vals.min()) != np.sign(r.vals.max())
+                )
+                if label not in (r.status, "remaining") or mixed_signs:
                     r.status = "remaining"
+                    _add_animation_frame(
+                        frames,
+                        k,
+                        "reopened",
+                        current_regions([r]),
+                        "classification reopened region",
+                    )
+                else:
+                    _add_animation_frame(
+                        frames,
+                        k,
+                        "classification",
+                        current_regions([r]),
+                        f"classification kept {r.status}",
+                    )
                 nxt.append(r)
                 continue
 
-            r.sample(N_PER_REGION)
+            r.sample(N_PER_REGION, on_sample=record_sample)
             label = r.classify()
             if label != "remaining":
                 r.status = label
+                _add_animation_frame(
+                    frames,
+                    k,
+                    "classification",
+                    current_regions([r]),
+                    f"classification: {label}",
+                )
                 nxt.append(r)
             else:
-                nxt.extend(r.split())
+                _add_animation_frame(
+                    frames,
+                    k,
+                    "classification",
+                    current_regions([r]),
+                    "classification: remaining",
+                )
+                kids = r.split()
+                nxt.extend(kids)
+                if not (len(kids) == 1 and kids[0] is r):
+                    _add_animation_frame(
+                        frames,
+                        k,
+                        "partition",
+                        nxt + remaining_regions,
+                        "partitioned remaining region",
+                    )
         regions = nxt
         if k in snapshot_at:
-            snapshots[k] = [Region(r.xmin, r.xmax, r.ymin, r.ymax,
-                                   r.status, r.pts.copy(), r.vals.copy())
-                            for r in regions]
+            snapshots[k] = _copy_regions(regions)
         counts = {s: sum(r.status == s for r in regions)
                   for s in ("remaining", "positive", "negative")}
         print(f"iter {k}: {len(regions):4d} regions  {counts}")
+    if trace:
+        return RunTrace(snapshots, frames)
     return snapshots
 
 # ----------------------------------------------------------------------------
@@ -174,28 +275,35 @@ def run(n_iters=9, snapshot_at=(1, 3, 6, 9)):
 # ----------------------------------------------------------------------------
 COLORS = {"remaining": "#b9c2f0", "positive": "#cdeccd", "negative": "#f3b9b9"}
 
+def _robustness_grid():
+    xs = np.linspace(BOUNDS[0], BOUNDS[1], 400)
+    ys = np.linspace(BOUNDS[2], BOUNDS[3], 400)
+    X, Y = np.meshgrid(xs, ys)
+    return X, Y, f(X, Y)
+
+def _draw_partition(ax, regions, title, grid):
+    X, Y, Z = grid
+    for r in regions:
+        ax.add_patch(Rectangle((r.xmin, r.ymin), r.xmax - r.xmin,
+                               r.ymax - r.ymin, facecolor=COLORS[r.status],
+                               edgecolor="black", linewidth=0.5))
+        if len(r.pts):
+            ax.scatter(r.pts[:, 0], r.pts[:, 1], s=1.5,
+                       c=np.where(r.vals < 0, "crimson", "navy"), zorder=3)
+    ax.contour(X, Y, Z, levels=[0.0], colors="dimgray", linewidths=1.2, zorder=4)
+    ax.set_xlim(BOUNDS[0], BOUNDS[1]); ax.set_ylim(BOUNDS[2], BOUNDS[3])
+    ax.set_aspect("equal")
+    ax.set_title(title)
+
 def plot(snapshots, path="partition_iterations.png"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(1, len(snapshots), figsize=(4.6 * len(snapshots), 4.6))
-    xs = np.linspace(BOUNDS[0], BOUNDS[1], 400)
-    ys = np.linspace(BOUNDS[2], BOUNDS[3], 400)
-    X, Y = np.meshgrid(xs, ys)
-    Z = f(X, Y)
+    grid = _robustness_grid()
 
     for ax, (k, regs) in zip(np.atleast_1d(axes), sorted(snapshots.items())):
-        for r in regs:
-            ax.add_patch(Rectangle((r.xmin, r.ymin), r.xmax - r.xmin,
-                                   r.ymax - r.ymin, facecolor=COLORS[r.status],
-                                   edgecolor="black", linewidth=0.5))
-            if len(r.pts):
-                ax.scatter(r.pts[:, 0], r.pts[:, 1], s=1.5,
-                           c=np.where(r.vals < 0, "crimson", "navy"), zorder=3)
-        ax.contour(X, Y, Z, levels=[0.0], colors="dimgray", linewidths=1.2, zorder=4)
-        ax.set_xlim(BOUNDS[0], BOUNDS[1]); ax.set_ylim(BOUNDS[2], BOUNDS[3])
-        ax.set_aspect("equal")
-        ax.set_title(f"iteration k = {k}")
+        _draw_partition(ax, regs, f"iteration k = {k}", grid)
     fig.suptitle("Adaptive robustness-aware branch-and-classify partitioning "
                  "(blue = remaining, green = positive, red = negative; "
                  "gray contour = zero robustness limit)", y=1.02)
@@ -203,6 +311,39 @@ def plot(snapshots, path="partition_iterations.png"):
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {path}")
+
+def animate(frames, gif_path, mpg_path, fps=8):
+    if not frames:
+        raise ValueError("animation requires at least one frame")
+    if not animation.writers.is_available("pillow"):
+        raise RuntimeError("Pillow animation writer is required to create GIF output")
+    if not animation.writers.is_available("ffmpeg"):
+        raise RuntimeError("ffmpeg animation writer is required to create MPG output")
+
+    gif_path = Path(gif_path)
+    mpg_path = Path(mpg_path)
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    mpg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(5.2, 5.2))
+    grid = _robustness_grid()
+
+    def draw(frame_index):
+        frame = frames[frame_index]
+        ax.clear()
+        title = f"iteration {frame.iteration}: {frame.event}\n{frame.label}"
+        _draw_partition(ax, frame.regions, title, grid)
+        return []
+
+    anim = animation.FuncAnimation(fig, draw, frames=len(frames), blit=False, repeat=False)
+    anim.save(str(gif_path), writer=animation.PillowWriter(fps=fps))
+    print(f"wrote {gif_path}")
+    anim.save(
+        str(mpg_path),
+        writer=animation.FFMpegWriter(fps=fps, codec="mpeg2video", bitrate=1800),
+    )
+    print(f"wrote {mpg_path}")
+    plt.close(fig)
 
 def _project_root():
     for parent in Path(__file__).resolve().parents:
@@ -212,6 +353,12 @@ def _project_root():
 
 def default_output_path():
     return _project_root() / "output" / "partition_iterations.png"
+
+def default_gif_output_path():
+    return _project_root() / "output" / "partition_iterations.gif"
+
+def default_mpg_output_path():
+    return _project_root() / "output" / "partition_iterations.mpg"
 
 def _positive_int(value):
     try:
@@ -268,6 +415,23 @@ def _build_parser():
         default=default_output_path(),
         help=f"path for the generated figure (default: {default_output_path()})",
     )
+    parser.add_argument(
+        "--anim",
+        action="store_true",
+        help="also write event-level GIF and MPG animations",
+    )
+    parser.add_argument(
+        "--gif-output",
+        type=Path,
+        default=default_gif_output_path(),
+        help=f"path for the generated GIF animation (default: {default_gif_output_path()})",
+    )
+    parser.add_argument(
+        "--mpg-output",
+        type=Path,
+        default=default_mpg_output_path(),
+        help=f"path for the generated MPG animation (default: {default_mpg_output_path()})",
+    )
     return parser
 
 def main(argv: list[str] | None = None) -> int:
@@ -278,8 +442,11 @@ def main(argv: list[str] | None = None) -> int:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 
-    snapshots = run(n_iters=args.iterations, snapshot_at=snapshot_at)
+    result = run(n_iters=args.iterations, snapshot_at=snapshot_at, trace=args.anim)
+    snapshots = result.snapshots if args.anim else result
     plot(snapshots, path=args.output)
+    if args.anim:
+        animate(result.frames, gif_path=args.gif_output, mpg_path=args.mpg_output)
     return 0
 
 if __name__ == "__main__":
