@@ -26,18 +26,52 @@ from matplotlib.patches import Rectangle
 rng = np.random.default_rng(7)
 
 # ----------------------------------------------------------------------------
-# Test function: positive almost everywhere, negative inside three blobs.
-# The zero level set is the boundary we are trying to localize.
+# Test function: positive almost everywhere, negative inside three ellipsoids.
+# The zero robustness limit is the boundary we are trying to localize.
 # ----------------------------------------------------------------------------
+ELLIPSOIDS = (
+    (-2.5, 3.0, 1.2, 0.9),
+    (3.2, 1.5, 1.0, 2.2),
+    (-3.5, -3.2, 1.0, 0.8),
+)
+
 def f(x, y):
-    g = lambda cx, cy, sx, sy: np.exp(-(((x - cx) / sx) ** 2 + ((y - cy) / sy) ** 2))
-    return 0.55 - (g(-2.5, 3.0, 1.2, 0.9)
-                   + g(3.2, 1.5, 1.0, 2.2)
-                   + g(-3.5, -3.2, 1.0, 0.8))
+    margins = [
+        ((np.asarray(x) - cx) / sx) ** 2 + ((np.asarray(y) - cy) / sy) ** 2 - 1
+        for cx, cy, sx, sy in ELLIPSOIDS
+    ]
+    robustness = np.minimum.reduce(margins)
+    if np.asarray(robustness).ndim == 0:
+        return float(robustness)
+    return robustness
+
+def evaluate(x, y):
+    robustness = f(x, y)
+    robustness_array = np.asarray(robustness)
+    classification = np.where(robustness_array < 0, "negative", "positive")
+    distance_to_limit = np.abs(robustness_array)
+
+    if robustness_array.ndim == 0:
+        return str(classification.item()), float(robustness), float(distance_to_limit)
+    return classification, robustness, distance_to_limit
 
 BOUNDS = (-5.0, 5.0, -5.0, 5.0)          # xmin, xmax, ymin, ymax
 N_PER_REGION = 30                        # samples added to a remaining region per iteration
 MIN_SIDE = 0.4                           # don't split below this edge length
+CANDIDATES_PER_SAMPLE = 20               # candidate pool for robustness-biased sampling
+MIN_CANDIDATES = 100
+ROBUSTNESS_WEIGHT_EPS = 1e-6
+
+def _robustness_sample_weights(robustness):
+    distance_to_limit = np.abs(np.asarray(robustness, dtype=float))
+    weights = 1.0 / (distance_to_limit + ROBUSTNESS_WEIGHT_EPS)
+    total = weights.sum()
+    if not np.isfinite(total) or total <= 0:
+        return np.full(distance_to_limit.shape, 1.0 / distance_to_limit.size)
+    return weights / total
+
+def _candidate_count(n):
+    return max(n, MIN_CANDIDATES, n * CANDIDATES_PER_SAMPLE)
 
 # ----------------------------------------------------------------------------
 # Region bookkeeping
@@ -54,10 +88,18 @@ class Region:
         return (self.xmax - self.xmin) * (self.ymax - self.ymin)
 
     def sample(self, n):
-        new = np.column_stack([rng.uniform(self.xmin, self.xmax, n),
-                               rng.uniform(self.ymin, self.ymax, n)])
+        if n <= 0:
+            return
+
+        n_candidates = _candidate_count(n)
+        candidates = np.column_stack([rng.uniform(self.xmin, self.xmax, n_candidates),
+                                      rng.uniform(self.ymin, self.ymax, n_candidates)])
+        candidate_vals = f(candidates[:, 0], candidates[:, 1])
+        weights = _robustness_sample_weights(candidate_vals)
+        picked = rng.choice(n_candidates, size=n, replace=False, p=weights)
+        new = candidates[picked]
         self.pts = np.vstack([self.pts, new])
-        self.vals = np.concatenate([self.vals, f(new[:, 0], new[:, 1])])
+        self.vals = np.concatenate([self.vals, candidate_vals[picked]])
 
     def classify(self):
         """Label the region if all evidence agrees, with a margin that shrinks
@@ -154,9 +196,9 @@ def plot(snapshots, path="partition_iterations.png"):
         ax.set_xlim(BOUNDS[0], BOUNDS[1]); ax.set_ylim(BOUNDS[2], BOUNDS[3])
         ax.set_aspect("equal")
         ax.set_title(f"iteration k = {k}")
-    fig.suptitle("Adaptive branch-and-classify partitioning "
+    fig.suptitle("Adaptive robustness-aware branch-and-classify partitioning "
                  "(blue = remaining, green = positive, red = negative; "
-                 "gray contour = true zero level set)", y=1.02)
+                 "gray contour = zero robustness limit)", y=1.02)
     fig.tight_layout()
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
