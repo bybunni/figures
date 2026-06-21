@@ -221,6 +221,20 @@ class Partition2dCliTests(unittest.TestCase):
         self.assertEqual(anim_mock.save.call_count, 2)
         self.assertEqual(anim_mock.save.call_args_list[0].args[0], str(gif_path))
         self.assertEqual(anim_mock.save.call_args_list[1].args[0], str(mpg_path))
+        self.assertIn("progress_callback", anim_mock.save.call_args_list[0].kwargs)
+        self.assertIn("progress_callback", anim_mock.save.call_args_list[1].kwargs)
+
+    def test_animation_progress_reports_start_steps_and_finish(self):
+        progress = partition2d._animation_progress("GIF", Path("/tmp/partition.gif"))
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            for frame in range(20):
+                progress(frame, 20)
+
+        output = stdout.getvalue()
+        self.assertIn("writing GIF /tmp/partition.gif: 1/20 frames (5%)", output)
+        self.assertIn("writing GIF /tmp/partition.gif: 2/20 frames (10%)", output)
+        self.assertIn("writing GIF /tmp/partition.gif: 20/20 frames (100%)", output)
 
 
 if __name__ == "__main__":

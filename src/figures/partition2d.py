@@ -312,6 +312,25 @@ def plot(snapshots, path="partition_iterations.png"):
     plt.close(fig)
     print(f"wrote {path}")
 
+def _animation_progress(label, path):
+    last_reported = {"bucket": -1}
+
+    def progress(current_frame, total_frames):
+        total_frames = max(total_frames, 1)
+        frame_number = current_frame + 1
+        percent = int(100 * frame_number / total_frames)
+        bucket = percent // 10
+        should_report = (
+            frame_number == 1
+            or frame_number == total_frames
+            or bucket > last_reported["bucket"]
+        )
+        if should_report:
+            last_reported["bucket"] = bucket
+            print(f"writing {label} {path}: {frame_number}/{total_frames} frames ({percent}%)")
+
+    return progress
+
 def animate(frames, gif_path, mpg_path, fps=8):
     if not frames:
         raise ValueError("animation requires at least one frame")
@@ -336,11 +355,16 @@ def animate(frames, gif_path, mpg_path, fps=8):
         return []
 
     anim = animation.FuncAnimation(fig, draw, frames=len(frames), blit=False, repeat=False)
-    anim.save(str(gif_path), writer=animation.PillowWriter(fps=fps))
+    anim.save(
+        str(gif_path),
+        writer=animation.PillowWriter(fps=fps),
+        progress_callback=_animation_progress("GIF", gif_path),
+    )
     print(f"wrote {gif_path}")
     anim.save(
         str(mpg_path),
         writer=animation.FFMpegWriter(fps=fps, codec="mpeg2video", bitrate=1800),
+        progress_callback=_animation_progress("MPG", mpg_path),
     )
     print(f"wrote {mpg_path}")
     plt.close(fig)
