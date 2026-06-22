@@ -278,9 +278,9 @@ MPG_CODEC = "mpeg1video"
 MPG_BITRATE = 4000
 MPG_ENCODE_FPS = 24
 
-def _robustness_grid():
-    xs = np.linspace(BOUNDS[0], BOUNDS[1], 400)
-    ys = np.linspace(BOUNDS[2], BOUNDS[3], 400)
+def _robustness_grid(resolution=400):
+    xs = np.linspace(BOUNDS[0], BOUNDS[1], resolution)
+    ys = np.linspace(BOUNDS[2], BOUNDS[3], resolution)
     X, Y = np.meshgrid(xs, ys)
     return X, Y, f(X, Y)
 
@@ -298,6 +298,41 @@ def _draw_partition(ax, regions, title, grid):
     ax.set_aspect("equal")
     ax.set_title(title)
 
+def _latest_snapshot(snapshots):
+    if not snapshots:
+        raise ValueError("3D plot requires at least one snapshot")
+    latest_iteration = max(snapshots)
+    return latest_iteration, snapshots[latest_iteration]
+
+def _draw_partition_3d(ax, regions, title, grid):
+    X, Y, Z = grid
+    ax.plot_surface(X, Y, Z, cmap="viridis", alpha=0.58, linewidth=0, antialiased=True)
+    ax.plot_surface(X, Y, np.zeros_like(Z), color="dimgray", alpha=0.12, linewidth=0)
+    ax.contour(X, Y, Z, levels=[0.0], zdir="z", offset=0.0,
+               colors="black", linewidths=1.3)
+
+    for r in regions:
+        rx = np.array([[r.xmin, r.xmax], [r.xmin, r.xmax]])
+        ry = np.array([[r.ymin, r.ymin], [r.ymax, r.ymax]])
+        rz = np.zeros_like(rx)
+        ax.plot_surface(rx, ry, rz, color=COLORS[r.status], alpha=0.28,
+                        linewidth=0, shade=False)
+        ax.plot([r.xmin, r.xmax, r.xmax, r.xmin, r.xmin],
+                [r.ymin, r.ymin, r.ymax, r.ymax, r.ymin],
+                [0, 0, 0, 0, 0], color="black", linewidth=0.35, alpha=0.65)
+        if len(r.pts):
+            ax.scatter(r.pts[:, 0], r.pts[:, 1], r.vals, s=5,
+                       c=np.where(r.vals < 0, "crimson", "navy"),
+                       depthshade=False)
+
+    ax.set_xlim(BOUNDS[0], BOUNDS[1]); ax.set_ylim(BOUNDS[2], BOUNDS[3])
+    ax.set_zlim(float(Z.min()), float(Z.max()))
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("robustness")
+    ax.view_init(elev=28, azim=-58)
+    ax.set_title(title)
+
 def plot(snapshots, path="partition_iterations.png"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,6 +345,21 @@ def plot(snapshots, path="partition_iterations.png"):
     fig.suptitle("Adaptive robustness-aware branch-and-classify partitioning "
                  "(blue = remaining, green = positive, red = negative; "
                  "gray contour = zero robustness limit)", y=1.02)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {path}")
+
+def plot_3d(snapshots, path="partition_iterations_3d.png"):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    latest_iteration, regions = _latest_snapshot(snapshots)
+
+    fig = plt.figure(figsize=(7.2, 6.2))
+    ax = fig.add_subplot(111, projection="3d")
+    grid = _robustness_grid(resolution=120)
+    _draw_partition_3d(ax, regions, f"iteration k = {latest_iteration}", grid)
+    fig.suptitle("Robustness surface with zero level and sampled evidence")
     fig.tight_layout()
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
@@ -381,6 +431,45 @@ def animate(frames, gif_path, mpg_path, fps=8):
     print(f"wrote {mpg_path}")
     plt.close(fig)
 
+def animate_3d(frames, gif_path, mpg_path, fps=8):
+    if not frames:
+        raise ValueError("3D animation requires at least one frame")
+    if not animation.writers.is_available("pillow"):
+        raise RuntimeError("Pillow animation writer is required to create 3D GIF output")
+    if not animation.writers.is_available("ffmpeg"):
+        raise RuntimeError("ffmpeg animation writer is required to create 3D MPG output")
+
+    gif_path = Path(gif_path)
+    mpg_path = Path(mpg_path)
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    mpg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(6.0, 5.6))
+    ax = fig.add_subplot(111, projection="3d")
+    grid = _robustness_grid(resolution=55)
+
+    def draw(frame_index):
+        frame = frames[frame_index]
+        ax.clear()
+        title = f"iteration {frame.iteration}: {frame.event}\n{frame.label}"
+        _draw_partition_3d(ax, frame.regions, title, grid)
+        return []
+
+    anim = animation.FuncAnimation(fig, draw, frames=len(frames), blit=False, repeat=False)
+    anim.save(
+        str(gif_path),
+        writer=animation.PillowWriter(fps=fps),
+        progress_callback=_animation_progress("3D GIF", gif_path),
+    )
+    print(f"wrote {gif_path}")
+    anim.save(
+        str(mpg_path),
+        writer=_mpg_writer(fps),
+        progress_callback=_animation_progress("3D MPG", mpg_path),
+    )
+    print(f"wrote {mpg_path}")
+    plt.close(fig)
+
 def _project_root():
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").is_file():
@@ -390,11 +479,20 @@ def _project_root():
 def default_output_path():
     return _project_root() / "output" / "partition_iterations.png"
 
+def default_output_3d_path():
+    return _project_root() / "output" / "partition_iterations_3d.png"
+
 def default_gif_output_path():
     return _project_root() / "output" / "partition_iterations.gif"
 
 def default_mpg_output_path():
     return _project_root() / "output" / "partition_iterations.mpg"
+
+def default_gif_output_3d_path():
+    return _project_root() / "output" / "partition_iterations_3d.gif"
+
+def default_mpg_output_3d_path():
+    return _project_root() / "output" / "partition_iterations_3d.mpg"
 
 def _positive_int(value):
     try:
@@ -452,9 +550,20 @@ def _build_parser():
         help=f"path for the generated figure (default: {default_output_path()})",
     )
     parser.add_argument(
+        "--output-3d",
+        type=Path,
+        default=default_output_3d_path(),
+        help=f"path for the generated 3D figure (default: {default_output_3d_path()})",
+    )
+    parser.add_argument(
         "--anim",
         action="store_true",
         help="also write event-level GIF and MPG animations",
+    )
+    parser.add_argument(
+        "--anim-3d",
+        action="store_true",
+        help="also write event-level 3D GIF and MPG animations",
     )
     parser.add_argument(
         "--gif-output",
@@ -468,6 +577,18 @@ def _build_parser():
         default=default_mpg_output_path(),
         help=f"path for the generated MPG animation (default: {default_mpg_output_path()})",
     )
+    parser.add_argument(
+        "--gif-output-3d",
+        type=Path,
+        default=default_gif_output_3d_path(),
+        help=f"path for the generated 3D GIF animation (default: {default_gif_output_3d_path()})",
+    )
+    parser.add_argument(
+        "--mpg-output-3d",
+        type=Path,
+        default=default_mpg_output_3d_path(),
+        help=f"path for the generated 3D MPG animation (default: {default_mpg_output_3d_path()})",
+    )
     return parser
 
 def main(argv: list[str] | None = None) -> int:
@@ -478,11 +599,15 @@ def main(argv: list[str] | None = None) -> int:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
 
-    result = run(n_iters=args.iterations, snapshot_at=snapshot_at, trace=args.anim)
-    snapshots = result.snapshots if args.anim else result
+    needs_trace = args.anim or args.anim_3d
+    result = run(n_iters=args.iterations, snapshot_at=snapshot_at, trace=needs_trace)
+    snapshots = result.snapshots if needs_trace else result
     plot(snapshots, path=args.output)
+    plot_3d(snapshots, path=args.output_3d)
     if args.anim:
         animate(result.frames, gif_path=args.gif_output, mpg_path=args.mpg_output)
+    if args.anim_3d:
+        animate_3d(result.frames, gif_path=args.gif_output_3d, mpg_path=args.mpg_output_3d)
     return 0
 
 if __name__ == "__main__":
