@@ -236,6 +236,17 @@ class Partition2dCliTests(unittest.TestCase):
         self.assertIn("writing GIF /tmp/partition.gif: 2/20 frames (10%)", output)
         self.assertIn("writing GIF /tmp/partition.gif: 20/20 frames (100%)", output)
 
+    def test_mpg_writer_uses_nonblocking_ffmpeg_profile(self):
+        with mock.patch.object(partition2d.animation, "FFMpegWriter") as writer_cls:
+            partition2d._mpg_writer(fps=8)
+
+        writer_cls.assert_called_once_with(
+            fps=24,
+            codec="mpeg1video",
+            bitrate=4000,
+            extra_args=["-vf", "setpts=3*PTS", "-loglevel", "fatal"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

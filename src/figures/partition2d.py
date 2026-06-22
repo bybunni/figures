@@ -274,6 +274,9 @@ def run(n_iters=9, snapshot_at=(1, 3, 6, 9), trace=False):
 # Plotting
 # ----------------------------------------------------------------------------
 COLORS = {"remaining": "#b9c2f0", "positive": "#cdeccd", "negative": "#f3b9b9"}
+MPG_CODEC = "mpeg1video"
+MPG_BITRATE = 4000
+MPG_ENCODE_FPS = 24
 
 def _robustness_grid():
     xs = np.linspace(BOUNDS[0], BOUNDS[1], 400)
@@ -318,7 +321,7 @@ def _animation_progress(label, path):
     def progress(current_frame, total_frames):
         total_frames = max(total_frames, 1)
         frame_number = current_frame + 1
-        percent = int(100 * frame_number / total_frames)
+        percent = max(1, int(100 * frame_number / total_frames))
         bucket = percent // 10
         should_report = (
             frame_number == 1
@@ -330,6 +333,15 @@ def _animation_progress(label, path):
             print(f"writing {label} {path}: {frame_number}/{total_frames} frames ({percent}%)")
 
     return progress
+
+def _mpg_writer(fps):
+    playback_scale = MPG_ENCODE_FPS / fps
+    return animation.FFMpegWriter(
+        fps=MPG_ENCODE_FPS,
+        codec=MPG_CODEC,
+        bitrate=MPG_BITRATE,
+        extra_args=["-vf", f"setpts={playback_scale:g}*PTS", "-loglevel", "fatal"],
+    )
 
 def animate(frames, gif_path, mpg_path, fps=8):
     if not frames:
@@ -363,7 +375,7 @@ def animate(frames, gif_path, mpg_path, fps=8):
     print(f"wrote {gif_path}")
     anim.save(
         str(mpg_path),
-        writer=animation.FFMpegWriter(fps=fps, codec="mpeg2video", bitrate=1800),
+        writer=_mpg_writer(fps),
         progress_callback=_animation_progress("MPG", mpg_path),
     )
     print(f"wrote {mpg_path}")
